@@ -9,8 +9,8 @@ rng(1)
 opts = optimset('MaxFunEvals',4000, 'MaxIter',5000,'Display','iter','TolFun', 1e-4,'TolX',1e-4);
 %Parameters to be fit from viral dynamics model
 X0 = log( [2.0e-05,0.15,0.55,5.5,900,80] ) ; %Known parameters taken from viral dynamics model
-lb = log( [2.0e-06,0.05,0.1,2.0,500,40])  ; %Lower bounds
-ub = log( [2.0e-04,0.5,1.0,8.0,1500,120])  ; %Upper bounds
+lb = log( [2.0e-07,0.005,0.01,0.50,10.0,1])  ; %Lower bounds
+ub = log( [2.0e-03,1.000,5.00,10.0,5000,800])  ; %Upper bounds
 
 % HIV Viral load data from proper simulation and perturbed with normally
 % distributed noise.
@@ -29,13 +29,35 @@ DataToFitIndex = [4,7,11,14,17,25,30,36];
 D = D(DataToFitIndex);
 TimeVec = TimeVec(DataToFitIndex);
 
-XInitialSol =  log( [2.0e-05,0.15,0.55 ,5.5,900,80] );
-%% Set up perturbed data
-NPoints = 4 ; 
+%% Set up data and multistart fitting
+NFits = 10 ; 
+SizePerturb = [0.8]; [0.2]; 
+D1 =  D + SizePerturb.*( randn(1,length(D) ) );   
+ObjFunction = @(X) HIV_Dynamics_ObjectiveFunction_V1(X,D1,TimeVec);
+% Distinct initial guesses
+%% Set up output
+UpdatedGuess = zeros(NFits,length(X0)); 
+XCorrectedVec = zeros(NFits,length(X0));  
+FValUpdate  = zeros(NFits,1); 
+BICTableValue =  zeros(NFits,1);
+CorrectorNorm = zeros(NFits,1);
+XInitialSol = log( [2.0e-05,0.15,0.55 ,5.5,900,80] );
+InitialGuess = zeros(NFits,length(X0)); 
+ParameterPerturb = [1.5]; % 0.5; 
 
-SizePerturb = [0.1,0.2]; 
-PerturbNormVec = [SizePerturb(1),-SizePerturb(1), SizePerturb(2),-SizePerturb(2)]; % linspace(PerturbNormLowerLimit,PerturbNormUpperLimit,NPoints);; % linspace(PerturbNormLowerLimit,PerturbNormUpperLimit,NPoints);
-DataVec  = zeros(NPoints,length(D)) ;
+ for jj = 1:NFits
+    InitialGuess(jj,:) = XInitialSol  +  ParameterPerturb.*( randn(1,length(XInitialSol) ) );
+    X0 = InitialGuess(jj,:); 
+    [XCorrected,fvalCorrected,~,output] =  fmincon(ObjFunction,X0,[],[],[],[],lb,ub,[],opts) ;
+    
+    XCorrectedVec(jj,:) = XCorrected;  
+    FValUpdate(jj) = fvalCorrected; 
+    BICTableValue(jj) = length(XInitialSol).*log(length(D1)) + 2*fvalCorrected ;
+ end
+
+
+
+
 
 %% Set up predictor
 %Stepsize for the finite difference calculations
@@ -77,25 +99,12 @@ FValPositive = zeros(NParam,1);
 FValNegative = zeros(NParam,1);
 ObjHessian = zeros(NParam,NParam);
 
-%% Set up output
-UpdatedGuess = zeros(NPoints,length(X0));
-XUpdatedSol =   XInitialSol;
-
-PredictedObjFunction = zeros(NPoints,1);
-
-XCorrectedVec = zeros(NPoints,length(X0));
-IterationsUpdate = zeros(NPoints,1);
-fEvalUpdate = zeros(NPoints,1);
-FValUpdate  = zeros(NPoints,1);
-PredictionfEvals = zeros(NPoints,1);
-ParameterAbsChangeVec =  zeros(NPoints,NParam);
-BICDifferenceTableValue =  zeros(NPoints,1);
 
 %% For plotting
 Fig1 = figure(1);
 Fig2 = figure(2);
 %Colors
-ColorVec = zeros(NPoints,3);
+ColorVec = zeros(10,3);
 ColorVec(1,:) = [158,1,66]/256;
 ColorVec(2,:) = [50,136,189 ]/256; % [213,62,79]/256;
 ColorVec(3,:) = [244,109,67]/256;
@@ -103,15 +112,16 @@ ColorVec(4,:) = [94,79,162 ]/256; % [ 253,174,97]/256;
 ColorVec(5,:) = [ 254,224,139]/256;
 ColorVec(6,:) = [53,151,143]./256; % [ 230,245,152]/256;
 ColorVec(7,:) = [ 171,221,164]/256;
-ColorVec(8,:) = [ 102,194,165]/256;
+ColorVec(8,:) = [94,79,162 ]/256; % [ 102,194,165]/256;
 ColorVec(9,:) = [50,136,189 ]/256;
-ColorVec(10,:) = [94,79,162 ]/256;
+ColorVec(10,:) = [244,109,67]/256; %[94,79,162 ]/256;
 
 
-for jj = 1: NPoints
+for jj = 1: NFits
     %% Perturb data 
-     D1 =  D + PerturbNormVec(jj).*(abs( randn(1,length(D)) ) );   
+     D =  D1 ;   
     %% Calculate numerical gradient
+    XUpdatedSol = XCorrectedVec(jj,:); 
     
     for ii = 1 :NParam
         XLower(ii,:)    =  XUpdatedSol - StepSize.*ParameterStencil(ii,:); 
@@ -150,66 +160,21 @@ for jj = 1: NPoints
     
     %Calculate the predictor matrix
     dThetaDData = - ObjHessian\ObjMixedSecondDifferenceXD;
-    
-    Corrector = dThetaDData*(D1'-D');
-    UpdatedGuess(jj,:) = XUpdatedSol + Corrector' ;
-    % Update the data and objective function
-    DUpdate = D1;
-    ObjFunction = @(X) HIV_Dynamics_ObjectiveFunction_V1(X,DUpdate,TimeVec);
-    DataVec(jj,:) = D1;
-    %Calculate  the Objective funciton at the updated guess and old
-    %optimized point
-    
-    PredictedObjFunction(jj) = ObjFunction(UpdatedGuess(jj,:)); 
-    
-    Prediction = PredictedObjFunction(jj);
-    XCorrectedVec(jj,:) = XUpdatedSol;
-    
-    [XCorrected,fvalCorrected,~,output] =  fmincon(ObjFunction,XUpdatedSol,[],[],[],[],lb,ub,[],opts) ;
-    
-    XCorrectedVec(jj,:) = XCorrected;
-    IterationsUpdate(jj) = output.iterations;
-    fEvalUpdate(jj) = output.funcCount;
-    FValUpdate(jj) = fvalCorrected;
-   PredictionfEvals(jj) = 2*NParam*(NParam+2);
-%       
-        %% Fold change in parameters
-    ParameterAbsChangeVec(jj,:) = [( UpdatedGuess(jj,:) -X0 )] ; % [( UpdatedGuess(ii,:) -X0 ),norm(UpdatedGuess(ii,:) -X0) ];
-    BICDifferenceTableValue(jj) = -2*Prediction+ 2*fvalCorrected ;%  -2*log(Prediction)+ 2*log(fvalCorrected) ;
+    CorrectorNorm(jj) = norm(dThetaDData,2);
+  
 end
 disp('Logical test if the absolute difference in BIC is less than 2')
-BICTest = abs(BICDifferenceTableValue) < 2
-
-% PlottingPerturbNorm = zeros(1,length(PerturbNorm)) ;
-PlottingIterUpdate = zeros(1,length(NPoints)) ; 
-PlottingFEvalUpdate = zeros(1,length(NPoints)) ; 
-PlottingFEvalPrediction = zeros(1,length(NPoints)) ;
-
-for ii = 1 : NPoints
-%     PlottingPerturbNorm(ii) = sum( PerturbNorm(1:ii));
-    PlottingIterUpdate(ii) = sum( IterationsUpdate(1:ii));
-    PlottingFEvalUpdate(ii) = sum( fEvalUpdate(1:ii)); 
-    PlottingFEvalPrediction(ii) = sum( PredictionfEvals(1:ii));
-end
-
+BICTest = abs(BICTableValue) < 2
 
 %% Plotting scripts
-PlottingIndex = 1:NPoints;
+PlottingIndex = [8,10]; % 1:NFits;
 for nn = 1:  length(PlottingIndex);  
 %     ii = 2*nn;
     ii = PlottingIndex(nn);
     %% Time set up
     ts = 0;
     tf = TimeVec(end);
-    TotalTime = [ts tf];
-    %Input model parameters from predicted guess
-    Y = exp( UpdatedGuess(ii,:) );
-    PA.beta = Y(1);
-    PA.p = Y(2);
-    PA.delta = Y(3);
-    PA.c =   Y(4);
-    PA.N =   Y(5);
-    PA.lambda = Y(6);
+    TotalTime = [ts tf]; 
 
     %% Inital Conditions
     TIC = 180;
@@ -217,16 +182,6 @@ for nn = 1:  length(PlottingIndex);
     VIC = 50000;
     %% Solve the ODE systems
     ViralDynamicsIC = [TIC,IIC,VIC];
-    %% Solve the untreated system
-    [solGuess] = HIV_DynamicsODESolver(TotalTime,ViralDynamicsIC,PA);
-    %% Fig 1: Data vs. guessed solution
-    figure(1)
-    hold on
-    g2 =  plot(solGuess.x(:),log(solGuess.y(3,:))./log(10),'LineWidth',1.1,'Color',ColorVec(ii,:),'LineStyle','-'); %grey
-    hold on
-    g12 = scatter(TimeVec,DataVec(ii,:),20,ColorVec(ii,:),'o','filled'); %,'20', [33,102,172]/255,'*');
-    hold on
-    ylim([2 5.5])
    %% Input model parameters from predicted guess
     Y = exp( XCorrectedVec(ii,:) );
     PA.beta = Y(1);
@@ -242,26 +197,12 @@ for nn = 1:  length(PlottingIndex);
     hold on
     g2 =  plot(solFit.x(:),log(solFit.y(3,:))./log(10),'LineWidth',1.1,'Color',ColorVec(ii,:),'LineStyle','-'); %grey
     hold on
-    g12 = scatter(TimeVec,DataVec(ii,:),20,ColorVec(ii,:),'o','filled'); %,'20', [33,102,172]/255,'*');
     hold on
     ylim([2 5.5])
     
 end
-
-LineWidth = 1.75;
-figure(3)
-g1 = plot([1:NPoints],PlottingFEvalUpdate(:) ,'-o','LineWidth',LineWidth,'Color',[67,147,195]/256 ,'MarkerSize',3,'MarkerFaceColor',[67,147,195]/256 );
-hold on
-g3 = plot([1:NPoints],PlottingFEvalPrediction(:) ,'-s','LineWidth',LineWidth,'Color',[171,221,164]/256,'MarkerSize',3,'MarkerFaceColor',[171,221,164]/256);
-hold on
-xlim([0.95,4.05]);
-xticks([1,2,3,4]);
-
- figure(4)
- h = heatmap(ParameterAbsChangeVec);
-
-ObjFuncComparison =(PredictedObjFunction - FValUpdate')./FValUpdate'
-
+figure(2)
+ g12 = scatter(TimeVec,D1,20,'k','o','filled'); %,'20', [33,102,172]/255,'*');
 %% Solvers
 function [sol] = HIV_DynamicsODESolver(totaltime,IC,PA) %DDE model without therapy
 opts = odeset('RelTol',1e-8,'AbsTol',1e-8,'MaxStep',1e-2);
