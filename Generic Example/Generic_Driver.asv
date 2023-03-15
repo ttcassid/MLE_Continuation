@@ -1,0 +1,133 @@
+%Script to simulate parameter sensitivity to data for HIV dynamics model
+close all
+clear all
+%rng default % For reproducibility
+rng(1)
+
+%% Initialize the optimizer
+% tic
+opts = optimset('MaxFunEvals',4000, 'MaxIter',5000,'Display','iter','TolFun', 1e-4,'TolX',1e-4);
+%Parameters to be fit from viral dynamics model
+X0 = log( [2.0e-05,0.15,0.55,5.5,900,80] ) ; %Known parameters taken from viral dynamics model
+lb = log( [2.0e-06,0.05,0.1,2.0,500,40])  ; %Lower bounds
+ub = log( [2.0e-04,0.5,1.0,8.0,1500,120])  ; %Upper bounds
+
+% HIV Viral load data from proper simulation and perturbed with normally
+% distributed noise.
+D = [] ; %Vector of calubrradata 
+TimeVec = [0,0.1,0.2:0.2:1,2:2:60] ;
+
+% To copnsider only a subset of the simulated data.
+DataToFitIndex = [4,7,11,14,17,25,30,36]; 
+
+D = D(DataToFitIndex);
+TimeVec = TimeVec(DataToFitIndex);
+
+XInitialSol =  []; %Vector of initial parameter values
+%% Set up perturbed data
+NPoints = 1 ; %Number of perturbations 
+
+SizePerturb = [0.2]; %Size of perturbation
+DataVec  = zeros(NPoints,length(D)) ;
+
+%% Set up predictor
+%Stepsize for the finite difference calculations
+StepSize = 0.1; %0.1 Parameters are on the log scale so this is an approx ~10% fold change
+NParam = length(X0);
+
+%Structures necessary to calculate first order derivative
+ParameterStencil = eye(NParam,NParam);
+XLower = zeros(NParam,NParam);
+XUpper = zeros(NParam,NParam);
+FValLower = zeros(NParam,length(D));
+FValUpper = zeros(NParam,length(D));
+ObjMixedSecondDifferenceXD = zeros(NParam,length(D));
+
+% Structures necessary to calculate Hessian matrix
+BasisVec = eye(NParam);
+k = 1; % Counter for each row.
+NEvalsHessian = (NParam)*(NParam-1)/2;
+FValPosTemplate = zeros(NEvalsHessian,NParam);
+FValNegTemplate = zeros(NEvalsHessian,NParam);
+for ii = 1 :NParam-1
+    for jj = ii+1:NParam
+        FValPosTemplate(k,:) = BasisVec(ii,:)+BasisVec(jj,:);
+        FValNegTemplate(k,:) = -BasisVec(ii,:)+BasisVec(jj,:);
+        k = k+1;
+    end
+end
+PositiveStencil = [FValPosTemplate;-FValPosTemplate];
+NegativeStencil = [FValNegTemplate;-FValNegTemplate];
+
+% Function to identify the Stencil row for the i,j partial derivative;
+% x(1)<x(2) necessarily here, only calculating the lower portion of the Hessian due to symmetry
+FStencil = @(x) (x(1)-1)*(2*NParam - x(1)-2)./2 + x(2)-1;
+
+%Matrices to store parameter updates and function evaluations
+XPositive = zeros(NParam,NParam);
+XNegative = zeros(NParam,NParam);
+FValPositive = zeros(NParam,1);
+FValNegative = zeros(NParam,1);
+ObjHessian = zeros(NParam,NParam);
+
+for jj = 1: NPoints
+    %% Perturb data 
+     D1 =  D + PerturbNormVec(jj).*(abs( randn(1,length(D)) ) );   
+    %% Calculate numerical gradient
+    
+    for ii = 1 :NParam
+        XLower(ii,:)    =  XUpdatedSol - StepSize.*ParameterStencil(ii,:); 
+        XUpper(ii,:)    =  XUpdatedSol + StepSize.*ParameterStencil(ii,:);
+        FValLower(ii,:) =  Generic_ModelSimulation(XLower(ii,:),D,TimeVec) ;
+        FValUpper(ii,:) = Generic_ModelSimulation(XUpper(ii,:),D,TimeVec);
+        ObjMixedSecondDifferenceXD(ii,:) = -2.*(FValUpper(ii,:) - FValLower(ii,:))./(2.*StepSize);
+    end
+    
+    % Create off diagonal elements of Hessian Matrix first
+    %Calculate Diagonal elements of Hessian Matrix d^2/dx^2(G(x,D))
+    %first, re-initalize to zero from previous runs
+    ObjHessian = zeros(NParam,NParam);
+    for ii = 1:NParam-1
+        for mm = ii+1:NParam
+            HessianIndex = FStencil([ii,mm]);
+            XPositive(1,:) =  XUpdatedSol + StepSize.*PositiveStencil(HessianIndex,:);
+            XPositive(2,:) =  XUpdatedSol + StepSize.*PositiveStencil(NEvalsHessian+HessianIndex,:);
+            XNegative(1,:) =  XUpdatedSol + StepSize.*NegativeStencil(HessianIndex,:);
+            XNegative(2,:) =  XUpdatedSol + StepSize.*NegativeStencil(NEvalsHessian+HessianIndex,:);
+            for kk = 1:2
+                FValPositive(kk,:) = Generic_Objective(XPositive(kk,:),D,TimeVec);
+                FValNegative(kk,:) = Generic_Objective(XNegative(kk,:),D,TimeVec);
+            end
+            ObjHessian(ii,mm) = ( FValPositive(1,:)+FValPositive(2,:) - ( FValNegative(1,:)+FValNegative(2,:) ) )./(4*StepSize.^2);
+        end
+    end
+    
+    % As we haven't calculated diagonal elements yet and enforce symmetry
+    ObjHessian = ObjHessian + ObjHessian';
+    
+    %Calculate Diagonal elements of Hessian Matrix d^2/dx^2(G(x,D))
+    for ii = 1:NParam
+        ObjHessian(ii,ii) = (Generic_Objective(XUpper(ii,:),D,TimeVec) - 2.*Generic_Objective(XUpdatedSol,D,TimeVec) +Generic_Objective(XLower(ii,:),D,TimeVec) )./(StepSize.^2);
+    end
+    
+    %Calculate the predictor matrix
+    dThetaDData = - ObjHessian\ObjMixedSecondDifferenceXD;
+    
+    Corrector = dThetaDData*(D1'-D');
+    UpdatedGuess(jj,:) = XUpdatedSol + Corrector' ;
+    % Update the data and objective function
+    DUpdate = D1;
+    ObjFunction = @(X) Generic_Objective(X,DUpdate,TimeVec);
+    DataVec(jj,:) = D1;
+    %Calculate  the Objective funciton at the updated guess and old
+    %optimized point
+    
+    PredictedObjFunction(jj) = ObjFunction(UpdatedGuess(jj,:)); 
+    
+        
+  end
+
+
+
+
+
